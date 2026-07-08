@@ -2,8 +2,8 @@ import sys
 
 import fitz
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QScrollArea,
@@ -33,11 +34,13 @@ class MainWindow(QMainWindow):
         self.openButton.clicked.connect(self.open_pdf)
 
         self.pageList = QListWidget()
+        self.pageList.setIconSize(QSize(140, 180))
+        self.pageList.setSpacing(10)
         self.pageList.currentRowChanged.connect(self.preview_page)
 
         leftPanel = QFrame()
         leftPanel.setMinimumWidth(225)
-        leftPanel.setMaximumWidth(275)
+        leftPanel.setMaximumWidth(285)
         leftLayout = QVBoxLayout()
         leftLayout.addWidget(self.openButton)
         leftLayout.addWidget(self.pageList)
@@ -105,9 +108,15 @@ class MainWindow(QMainWindow):
         self.doc = fitz.open(filename)
         self.current_file = filename
         self.pageList.clear()
+        self.statusLabel.setText("Generating thumbnails...")
+        QApplication.processEvents()
 
         for page_index in range(self.doc.page_count):
-            self.pageList.addItem(f"Page {page_index + 1}")
+            thumbnail = self.create_page_pixmap(page_index, zoom=0.18)
+            item = QListWidgetItem(QIcon(thumbnail), f"Page {page_index + 1}")
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setSizeHint(QSize(180, 220))
+            self.pageList.addItem(item)
 
         self.fileLabel.setText(filename)
         self.pageCountLabel.setText(str(self.doc.page_count))
@@ -124,8 +133,18 @@ class MainWindow(QMainWindow):
         if self.doc is None or page_index < 0:
             return
 
+        pixmap = self.create_page_pixmap(page_index, zoom=1.5)
+        self.previewLabel.setPixmap(pixmap)
+        self.previewLabel.adjustSize()
+
+        self.currentPageLabel.setText(f"{page_index + 1} of {self.doc.page_count}")
+        self.vendorLabel.setText("Not detected yet")
+        self.invoiceNumberLabel.setText("Not detected yet")
+        self.invoiceDateLabel.setText("Not detected yet")
+        self.statusLabel.setText("Preview ready")
+
+    def create_page_pixmap(self, page_index, zoom):
         page = self.doc.load_page(page_index)
-        zoom = 1.5
         matrix = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=matrix, alpha=False)
 
@@ -136,16 +155,7 @@ class MainWindow(QMainWindow):
             pix.stride,
             QImage.Format_RGB888,
         )
-        pixmap = QPixmap.fromImage(image)
-
-        self.previewLabel.setPixmap(pixmap)
-        self.previewLabel.adjustSize()
-
-        self.currentPageLabel.setText(f"{page_index + 1} of {self.doc.page_count}")
-        self.vendorLabel.setText("Not detected yet")
-        self.invoiceNumberLabel.setText("Not detected yet")
-        self.invoiceDateLabel.setText("Not detected yet")
-        self.statusLabel.setText("Preview ready")
+        return QPixmap.fromImage(image)
 
 
 app = QApplication(sys.argv)
