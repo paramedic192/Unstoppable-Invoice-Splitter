@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QTextEdit,
@@ -64,6 +65,16 @@ class MainWindow(QMainWindow):
             bool(self.last_output_folder and os.path.isdir(self.last_output_folder))
         )
 
+        self.progressLabel = QLabel("")
+        self.progressLabel.setAlignment(Qt.AlignCenter)
+        self.progressLabel.hide()
+
+        self.progressBar = QProgressBar()
+        self.progressBar.setMinimum(0)
+        self.progressBar.setValue(0)
+        self.progressBar.setTextVisible(True)
+        self.progressBar.hide()
+
         self.pageList = QListWidget()
         self.pageList.setIconSize(QSize(140, 180))
         self.pageList.setSpacing(10)
@@ -78,6 +89,8 @@ class MainWindow(QMainWindow):
         leftLayout.addWidget(self.ocrButton)
         leftLayout.addWidget(self.splitButton)
         leftLayout.addWidget(self.openOutputButton)
+        leftLayout.addWidget(self.progressLabel)
+        leftLayout.addWidget(self.progressBar)
         leftLayout.addWidget(self.pageList)
         leftPanel.setLayout(leftLayout)
 
@@ -184,7 +197,6 @@ class MainWindow(QMainWindow):
         pixmap = self.create_page_pixmap(page_index, zoom=1.5)
         self.previewLabel.setPixmap(pixmap)
         self.previewLabel.adjustSize()
-
         self.currentPageLabel.setText(f"{page_index + 1} of {self.doc.page_count}")
 
         if page_index in self.ocr_cache:
@@ -199,9 +211,7 @@ class MainWindow(QMainWindow):
 
     def create_page_pixmap(self, page_index, zoom):
         page = self.doc.load_page(page_index)
-        matrix = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=matrix, alpha=False)
-
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
         image = QImage(
             pix.samples,
             pix.width,
@@ -222,6 +232,16 @@ class MainWindow(QMainWindow):
 
         return output_path
 
+    def set_split_controls_enabled(self, enabled):
+        self.openButton.setEnabled(enabled)
+        self.ocrButton.setEnabled(enabled and self.doc is not None)
+        self.splitButton.setEnabled(enabled and self.doc is not None)
+        self.openOutputButton.setEnabled(
+            enabled
+            and bool(self.last_output_folder)
+            and os.path.isdir(self.last_output_folder)
+        )
+
     def split_each_page(self):
         if self.doc is None or not self.current_file:
             return
@@ -235,15 +255,20 @@ class MainWindow(QMainWindow):
             "Choose Output Folder",
             starting_folder,
         )
-
         if not output_folder:
             return
 
         self.last_output_folder = output_folder
         self.settings.setValue("last_output_folder", output_folder)
-        self.openOutputButton.setEnabled(True)
 
+        total_pages = self.doc.page_count
+        self.progressBar.setRange(0, total_pages)
+        self.progressBar.setValue(0)
+        self.progressBar.show()
+        self.progressLabel.setText(f"Preparing to split {total_pages} pages...")
+        self.progressLabel.show()
         self.statusLabel.setText("Splitting PDF...")
+        self.set_split_controls_enabled(False)
         QApplication.processEvents()
 
         source_name = os.path.splitext(os.path.basename(self.current_file))[0]
@@ -253,26 +278,46 @@ class MainWindow(QMainWindow):
 
         batch_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        for page_index in range(self.doc.page_count):
-            new_pdf = fitz.open()
-            new_pdf.insert_pdf(
-                self.doc,
-                from_page=page_index,
-                to_page=page_index,
+        try:
+            for page_index in range(total_pages):
+                new_pdf = fitz.open()
+                try:
+                    new_pdf.insert_pdf(
+                        self.doc,
+                        from_page=page_index,
+                        to_page=page_index,
+                    )
+                    filename = (
+                        f"{safe_source_name}_{batch_timestamp}_"
+                        f"page_{page_index + 1:03}.pdf"
+                    )
+                    output_path = self.get_unique_filename(output_folder, filename)
+                    new_pdf.save(output_path)
+                finally:
+                    new_pdf.close()
+
+                completed = page_index + 1
+                self.progressBar.setValue(completed)
+                self.progressLabel.setText(
+                    f"Splitting page {completed} of {total_pages}"
+                )
+                self.statusLabel.setText(
+                    f"Saved page {completed} of {total_pages}"
+                )
+                QApplication.processEvents()
+
+            self.progressLabel.setText(
+                f"Complete: {total_pages} pages exported successfully."
             )
-
-            filename = (
-                f"{safe_source_name}_{batch_timestamp}_"
-                f"page_{page_index + 1:03}.pdf"
+            self.statusLabel.setText(
+                f"Done! {total_pages} pages saved to the remembered folder."
             )
-            output_path = self.get_unique_filename(output_folder, filename)
-
-            new_pdf.save(output_path)
-            new_pdf.close()
-
-        self.statusLabel.setText(
-            f"Done! {self.doc.page_count} pages saved to the remembered folder."
-        )
+        except Exception as error:
+            self.progressLabel.setText("Split stopped because of an error.")
+            self.statusLabel.setText(f"Split failed: {error}")
+        finally:
+            self.set_split_controls_enabled(True)
+            self.openOutputButton.setEnabled(True)
 
     def open_output_folder(self):
         if not self.last_output_folder or not os.path.isdir(self.last_output_folder):
@@ -297,21 +342,19 @@ class MainWindow(QMainWindow):
         self.statusLabel.setText("Running OCR...")
         QApplication.processEvents()
 
-        text = self.extract_text_from_page(page_index)
-        self.ocr_cache[page_index] = text
-
-        self.update_invoice_details(text)
-        self.statusLabel.setText("OCR complete")
+        try:
+            text = self.extract_text_from_page(page_index)
+            self.ocr_cache[page_index] = text
+            self.update_invoice_details(text)
+            self.statusLabel.setText("OCR complete")
+        except Exception as error:
+            self.statusLabel.setText(f"OCR failed: {error}")
 
     def extract_text_from_page(self, page_index):
         page = self.doc.load_page(page_index)
-        matrix = fitz.Matrix(2.5, 2.5)
-        pix = page.get_pixmap(matrix=matrix, alpha=False)
-
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
         image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        text = pytesseract.image_to_string(image)
-
-        return text.strip()
+        return pytesseract.image_to_string(image).strip()
 
     def update_invoice_details(self, text):
         self.vendorLabel.setText(self.detect_vendor(text))
@@ -321,7 +364,6 @@ class MainWindow(QMainWindow):
 
     def detect_vendor(self, text):
         upper_text = text.upper()
-
         if "GORDON" in upper_text or "GFS" in upper_text:
             return "Gordon Food Service"
         if "PECK" in upper_text:
@@ -330,7 +372,6 @@ class MainWindow(QMainWindow):
             return "Valley Wholesale Foods"
         if "RITCHIE" in upper_text:
             return "Ritchie's Food Distribution"
-
         return "Unknown"
 
     def detect_invoice_number(self, text):
@@ -338,12 +379,10 @@ class MainWindow(QMainWindow):
             r"Invoice\s*(?:No\.?|Number|#)?\s*[:\-]?\s*([A-Z0-9\-]{5,})",
             r"Inv\s*(?:No\.?|#)?\s*[:\-]?\s*([A-Z0-9\-]{5,})",
         ]
-
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 return match.group(1)
-
         return "Not detected yet"
 
     def detect_invoice_date(self, text):
@@ -351,12 +390,10 @@ class MainWindow(QMainWindow):
             r"(?:Invoice\s*)?Date\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
             r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
         ]
-
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 return match.group(1)
-
         return "Not detected yet"
 
 
