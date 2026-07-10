@@ -167,17 +167,25 @@ class MainWindow(QMainWindow):
             candidates.append(path_candidate)
 
         for candidate in candidates:
-            if candidate and os.path.isfile(candidate):
-                install_folder = os.path.dirname(candidate)
-                tessdata_folder = os.path.join(install_folder, "tessdata")
-                english_data = os.path.join(tessdata_folder, "eng.traineddata")
+            if not candidate or not os.path.isfile(candidate):
+                continue
 
-                if os.path.isfile(english_data):
-                    self.tesseract_path = candidate
-                    self.tessdata_path = tessdata_folder
-                    pytesseract.pytesseract.tesseract_cmd = candidate
-                    os.environ["TESSDATA_PREFIX"] = tessdata_folder
-                    return True
+            install_folder = os.path.dirname(candidate)
+            tessdata_folder = os.path.join(install_folder, "tessdata")
+            english_data = os.path.join(tessdata_folder, "eng.traineddata")
+
+            if not os.path.isfile(english_data):
+                continue
+
+            self.tesseract_path = candidate
+            self.tessdata_path = tessdata_folder
+            pytesseract.pytesseract.tesseract_cmd = candidate
+
+            # Do not pass --tessdata-dir with a quoted Windows path. Some
+            # Tesseract builds include the closing quote in the resolved path.
+            # TESSDATA_PREFIX is more reliable when it ends with a separator.
+            os.environ["TESSDATA_PREFIX"] = tessdata_folder + os.sep
+            return True
 
         self.tesseract_path = None
         self.tessdata_path = None
@@ -400,11 +408,10 @@ class MainWindow(QMainWindow):
         page = self.doc.load_page(page_index)
         pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
         image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        return pytesseract.image_to_string(
-            image,
-            lang="eng",
-            config=f'--tessdata-dir "{self.tessdata_path}"',
-        ).strip()
+
+        # TESSDATA_PREFIX is configured above. Avoid --tessdata-dir because
+        # quoted Windows paths can be parsed incorrectly by some builds.
+        return pytesseract.image_to_string(image, lang="eng").strip()
 
     def update_invoice_details(self, text):
         self.vendorLabel.setText(self.detect_vendor(text))
