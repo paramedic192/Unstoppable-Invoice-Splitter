@@ -7,7 +7,7 @@ import fitz
 import pytesseract
 from PIL import Image
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import QSettings, QSize, Qt
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -34,6 +34,15 @@ class MainWindow(QMainWindow):
         self.doc = None
         self.current_file = None
         self.ocr_cache = {}
+        self.settings = QSettings(
+            "FM Web Solutions",
+            "Unstoppable Invoice Splitter",
+        )
+        self.last_output_folder = self.settings.value(
+            "last_output_folder",
+            "",
+            type=str,
+        )
 
         self.setWindowTitle("Unstoppable Invoice Splitter")
         self.resize(1500, 900)
@@ -49,6 +58,12 @@ class MainWindow(QMainWindow):
         self.splitButton.clicked.connect(self.split_each_page)
         self.splitButton.setEnabled(False)
 
+        self.openOutputButton = QPushButton("Open Output Folder")
+        self.openOutputButton.clicked.connect(self.open_output_folder)
+        self.openOutputButton.setEnabled(
+            bool(self.last_output_folder and os.path.isdir(self.last_output_folder))
+        )
+
         self.pageList = QListWidget()
         self.pageList.setIconSize(QSize(140, 180))
         self.pageList.setSpacing(10)
@@ -62,6 +77,7 @@ class MainWindow(QMainWindow):
         leftLayout.addWidget(self.openButton)
         leftLayout.addWidget(self.ocrButton)
         leftLayout.addWidget(self.splitButton)
+        leftLayout.addWidget(self.openOutputButton)
         leftLayout.addWidget(self.pageList)
         leftPanel.setLayout(leftLayout)
 
@@ -129,6 +145,9 @@ class MainWindow(QMainWindow):
         )
         if not filename:
             return
+
+        if self.doc is not None:
+            self.doc.close()
 
         self.doc = fitz.open(filename)
         self.current_file = filename
@@ -207,13 +226,22 @@ class MainWindow(QMainWindow):
         if self.doc is None or not self.current_file:
             return
 
+        starting_folder = self.last_output_folder
+        if not starting_folder or not os.path.isdir(starting_folder):
+            starting_folder = os.path.dirname(self.current_file)
+
         output_folder = QFileDialog.getExistingDirectory(
             self,
             "Choose Output Folder",
+            starting_folder,
         )
 
         if not output_folder:
             return
+
+        self.last_output_folder = output_folder
+        self.settings.setValue("last_output_folder", output_folder)
+        self.openOutputButton.setEnabled(True)
 
         self.statusLabel.setText("Splitting PDF...")
         QApplication.processEvents()
@@ -243,8 +271,20 @@ class MainWindow(QMainWindow):
             new_pdf.close()
 
         self.statusLabel.setText(
-            f"Done! {self.doc.page_count} uniquely named pages exported."
+            f"Done! {self.doc.page_count} pages saved to the remembered folder."
         )
+
+    def open_output_folder(self):
+        if not self.last_output_folder or not os.path.isdir(self.last_output_folder):
+            self.statusLabel.setText("No output folder is available yet.")
+            self.openOutputButton.setEnabled(False)
+            return
+
+        try:
+            os.startfile(self.last_output_folder)
+            self.statusLabel.setText("Output folder opened.")
+        except OSError as error:
+            self.statusLabel.setText(f"Could not open output folder: {error}")
 
     def ocr_current_page(self):
         if self.doc is None:
