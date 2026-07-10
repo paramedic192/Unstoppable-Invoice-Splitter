@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import sys
 from datetime import datetime
 
@@ -35,6 +36,9 @@ class MainWindow(QMainWindow):
         self.doc = None
         self.current_file = None
         self.ocr_cache = {}
+        self.tesseract_path = None
+        self.tessdata_path = None
+
         self.settings = QSettings(
             "FM Web Solutions",
             "Unstoppable Invoice Splitter",
@@ -115,6 +119,7 @@ class MainWindow(QMainWindow):
         self.invoiceNumberLabel = QLabel("Not detected yet")
         self.invoiceDateLabel = QLabel("Not detected yet")
         self.statusLabel = QLabel("Ready")
+        self.statusLabel.setWordWrap(True)
 
         self.ocrText = QTextEdit()
         self.ocrText.setReadOnly(True)
@@ -148,6 +153,35 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         widget.setLayout(mainLayout)
         self.setCentralWidget(widget)
+
+        self.configure_tesseract()
+
+    def configure_tesseract(self):
+        candidates = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+
+        path_candidate = shutil.which("tesseract")
+        if path_candidate:
+            candidates.append(path_candidate)
+
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate):
+                install_folder = os.path.dirname(candidate)
+                tessdata_folder = os.path.join(install_folder, "tessdata")
+                english_data = os.path.join(tessdata_folder, "eng.traineddata")
+
+                if os.path.isfile(english_data):
+                    self.tesseract_path = candidate
+                    self.tessdata_path = tessdata_folder
+                    pytesseract.pytesseract.tesseract_cmd = candidate
+                    os.environ["TESSDATA_PREFIX"] = tessdata_folder
+                    return True
+
+        self.tesseract_path = None
+        self.tessdata_path = None
+        return False
 
     def open_pdf(self):
         filename, _ = QFileDialog.getOpenFileName(
@@ -339,6 +373,13 @@ class MainWindow(QMainWindow):
         if page_index < 0:
             return
 
+        if not self.configure_tesseract():
+            self.statusLabel.setText(
+                "OCR unavailable. Tesseract or eng.traineddata was not found in "
+                r"C:\Program Files\Tesseract-OCR."
+            )
+            return
+
         self.statusLabel.setText("Running OCR...")
         QApplication.processEvents()
 
@@ -347,6 +388,11 @@ class MainWindow(QMainWindow):
             self.ocr_cache[page_index] = text
             self.update_invoice_details(text)
             self.statusLabel.setText("OCR complete")
+        except pytesseract.TesseractError as error:
+            self.statusLabel.setText(
+                "OCR could not start. Tesseract was found, but its language data "
+                f"could not be loaded: {error}"
+            )
         except Exception as error:
             self.statusLabel.setText(f"OCR failed: {error}")
 
@@ -354,7 +400,11 @@ class MainWindow(QMainWindow):
         page = self.doc.load_page(page_index)
         pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
         image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        return pytesseract.image_to_string(image).strip()
+        return pytesseract.image_to_string(
+            image,
+            lang="eng",
+            config=f'--tessdata-dir "{self.tessdata_path}"',
+        ).strip()
 
     def update_invoice_details(self, text):
         self.vendorLabel.setText(self.detect_vendor(text))
