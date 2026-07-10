@@ -170,10 +170,8 @@ class MainWindow(QMainWindow):
             if not candidate or not os.path.isfile(candidate):
                 continue
 
-            install_folder = os.path.dirname(candidate)
-            tessdata_folder = os.path.join(install_folder, "tessdata")
+            tessdata_folder = os.path.join(os.path.dirname(candidate), "tessdata")
             english_data = os.path.join(tessdata_folder, "eng.traineddata")
-
             if not os.path.isfile(english_data):
                 continue
 
@@ -181,10 +179,9 @@ class MainWindow(QMainWindow):
             self.tessdata_path = tessdata_folder
             pytesseract.pytesseract.tesseract_cmd = candidate
 
-            # Do not pass --tessdata-dir with a quoted Windows path. Some
-            # Tesseract builds include the closing quote in the resolved path.
-            # TESSDATA_PREFIX is more reliable when it ends with a separator.
-            os.environ["TESSDATA_PREFIX"] = tessdata_folder + os.sep
+            # A malformed system TESSDATA_PREFIX can override the correct folder.
+            # Remove it and pass the folder directly to each OCR request instead.
+            os.environ.pop("TESSDATA_PREFIX", None)
             return True
 
         self.tesseract_path = None
@@ -343,9 +340,7 @@ class MainWindow(QMainWindow):
                 self.progressLabel.setText(
                     f"Splitting page {completed} of {total_pages}"
                 )
-                self.statusLabel.setText(
-                    f"Saved page {completed} of {total_pages}"
-                )
+                self.statusLabel.setText(f"Saved page {completed} of {total_pages}")
                 QApplication.processEvents()
 
             self.progressLabel.setText(
@@ -383,8 +378,7 @@ class MainWindow(QMainWindow):
 
         if not self.configure_tesseract():
             self.statusLabel.setText(
-                "OCR unavailable. Tesseract or eng.traineddata was not found in "
-                r"C:\Program Files\Tesseract-OCR."
+                "OCR unavailable. Tesseract or eng.traineddata could not be found."
             )
             return
 
@@ -398,8 +392,8 @@ class MainWindow(QMainWindow):
             self.statusLabel.setText("OCR complete")
         except pytesseract.TesseractError as error:
             self.statusLabel.setText(
-                "OCR could not start. Tesseract was found, but its language data "
-                f"could not be loaded: {error}"
+                "OCR could not load the English language data. "
+                f"Tessdata folder: {self.tessdata_path}. Error: {error}"
             )
         except Exception as error:
             self.statusLabel.setText(f"OCR failed: {error}")
@@ -409,9 +403,12 @@ class MainWindow(QMainWindow):
         pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
         image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
-        # TESSDATA_PREFIX is configured above. Avoid --tessdata-dir because
-        # quoted Windows paths can be parsed incorrectly by some builds.
-        return pytesseract.image_to_string(image, lang="eng").strip()
+        config = f'--tessdata-dir "{self.tessdata_path}"'
+        return pytesseract.image_to_string(
+            image,
+            lang="eng",
+            config=config,
+        ).strip()
 
     def update_invoice_details(self, text):
         self.vendorLabel.setText(self.detect_vendor(text))
