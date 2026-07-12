@@ -1,13 +1,12 @@
 import os
 import re
-import shutil
 import sys
 from datetime import datetime
 
 import fitz
-import pytesseract
 from PIL import Image
 
+from core.ocr_engine import OCREngine, OCREngineError
 from PySide6.QtCore import QSettings, QSize, Qt
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
@@ -36,8 +35,7 @@ class MainWindow(QMainWindow):
         self.doc = None
         self.current_file = None
         self.ocr_cache = {}
-        self.tesseract_path = None
-        self.tessdata_path = None
+        self.ocr_engine = OCREngine()
 
         self.settings = QSettings(
             "FM Web Solutions",
@@ -154,39 +152,10 @@ class MainWindow(QMainWindow):
         widget.setLayout(mainLayout)
         self.setCentralWidget(widget)
 
-        self.configure_tesseract()
-
-    def configure_tesseract(self):
-        candidates = [
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        ]
-
-        path_candidate = shutil.which("tesseract")
-        if path_candidate:
-            candidates.append(path_candidate)
-
-        for candidate in candidates:
-            if not candidate or not os.path.isfile(candidate):
-                continue
-
-            tessdata_folder = os.path.join(os.path.dirname(candidate), "tessdata")
-            english_data = os.path.join(tessdata_folder, "eng.traineddata")
-            if not os.path.isfile(english_data):
-                continue
-
-            self.tesseract_path = candidate
-            self.tessdata_path = tessdata_folder
-            pytesseract.pytesseract.tesseract_cmd = candidate
-
-            # A malformed system TESSDATA_PREFIX can override the correct folder.
-            # Remove it and pass the folder directly to each OCR request instead.
-            os.environ.pop("TESSDATA_PREFIX", None)
-            return True
-
-        self.tesseract_path = None
-        self.tessdata_path = None
-        return False
+        if not self.ocr_engine.available:
+            self.statusLabel.setText(
+                "OCR is not configured yet. Splitting is still available."
+            )
 
     def open_pdf(self):
         filename, _ = QFileDialog.getOpenFileName(
@@ -198,10 +167,17 @@ class MainWindow(QMainWindow):
         if not filename:
             return
 
-        if self.doc is not None:
-            self.doc.close()
+        try:
+            if self.doc is not None:
+                self.doc.close()
 
-        self.doc = fitz.open(filename)
+            self.doc = fitz.open(filename)
+        except Exception as error:
+            self.doc = None
+            self.current_file = None
+            self.statusLabel.setText(f"Could not open PDF: {error}")
+            return
+
         self.current_file = filename
         self.ocr_cache = {}
         self.pageList.clear()
@@ -258,7 +234,7 @@ class MainWindow(QMainWindow):
             pix.stride,
             QImage.Format_RGB888,
         )
-        return QPixmap.fromImage(image)
+        return QPixmap.fromImage(image.copy())
 
     def get_unique_filename(self, folder, filename):
         base_name, extension = os.path.splitext(filename)
@@ -340,7 +316,9 @@ class MainWindow(QMainWindow):
                 self.progressLabel.setText(
                     f"Splitting page {completed} of {total_pages}"
                 )
-                self.statusLabel.setText(f"Saved page {completed} of {total_pages}")
+                self.statusLabel.setText(
+                    f"Saved page {completed} of {total_pages}"
+                )
                 QApplication.processEvents()
 
             self.progressLabel.setText(
@@ -376,13 +354,19 @@ class MainWindow(QMainWindow):
         if page_index < 0:
             return
 
-        if not self.configure_tesseract():
+        if not self.ocr_engine.available:
             self.statusLabel.setText(
-                "OCR unavailable. Tesseract or eng.traineddata could not be found."
+                "OCR unavailable. " + self.ocr_engine.diagnostic_text()
             )
             return
 
+        if page_index in self.ocr_cache:
+            self.update_invoice_details(self.ocr_cache[page_index])
+            self.statusLabel.setText("OCR loaded from cache")
+            return
+
         self.statusLabel.setText("Running OCR...")
+        self.ocrButton.setEnabled(False)
         QApplication.processEvents()
 
         try:
@@ -390,31 +374,24 @@ class MainWindow(QMainWindow):
             self.ocr_cache[page_index] = text
             self.update_invoice_details(text)
             self.statusLabel.setText("OCR complete")
-        except pytesseract.TesseractError as error:
-            self.statusLabel.setText(
-                "OCR could not load the English language data. "
-                f"Tessdata folder: {self.tessdata_path}. Error: {error}"
-            )
+        except OCREngineError as error:
+            self.statusLabel.setText(str(error))
         except Exception as error:
             self.statusLabel.setText(f"OCR failed: {error}")
+        finally:
+            self.ocrButton.setEnabled(True)
 
     def extract_text_from_page(self, page_index):
         page = self.doc.load_page(page_index)
         pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
         image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-
-        config = f'--tessdata-dir "{self.tessdata_path}"'
-        return pytesseract.image_to_string(
-            image,
-            lang="eng",
-            config=config,
-        ).strip()
+        return self.ocr_engine.read_image(image, language="eng")
 
     def update_invoice_details(self, text):
         self.vendorLabel.setText(self.detect_vendor(text))
         self.invoiceNumberLabel.setText(self.detect_invoice_number(text))
         self.invoiceDateLabel.setText(self.detect_invoice_date(text))
-        self.ocrText.setPlainText(text[:3000])
+        self.ocrText.setPlainText(text[:5000])
 
     def detect_vendor(self, text):
         upper_text = text.upper()
@@ -449,6 +426,11 @@ class MainWindow(QMainWindow):
             if match:
                 return match.group(1)
         return "Not detected yet"
+
+    def closeEvent(self, event):
+        if self.doc is not None:
+            self.doc.close()
+        event.accept()
 
 
 app = QApplication(sys.argv)
