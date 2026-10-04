@@ -7,6 +7,7 @@ import fitz
 from PIL import Image
 
 from core.ocr_engine import OCREngine, OCREngineError
+from core.scanner import ScannerError, discover_scanners, preferred_scanner
 from PySide6.QtCore import QSettings, QSize, Qt
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
@@ -53,6 +54,9 @@ class MainWindow(QMainWindow):
         self.openButton = QPushButton("Open PDF")
         self.openButton.clicked.connect(self.open_pdf)
 
+        self.scanButton = QPushButton("Scan Batch")
+        self.scanButton.clicked.connect(self.detect_scanner)
+
         self.ocrButton = QPushButton("OCR Current Page")
         self.ocrButton.clicked.connect(self.ocr_current_page)
         self.ocrButton.setEnabled(False)
@@ -88,6 +92,7 @@ class MainWindow(QMainWindow):
 
         leftLayout = QVBoxLayout()
         leftLayout.addWidget(self.openButton)
+        leftLayout.addWidget(self.scanButton)
         leftLayout.addWidget(self.ocrButton)
         leftLayout.addWidget(self.splitButton)
         leftLayout.addWidget(self.openOutputButton)
@@ -156,6 +161,29 @@ class MainWindow(QMainWindow):
             self.statusLabel.setText(
                 "OCR is not configured yet. Splitting is still available."
             )
+
+    def detect_scanner(self):
+        self.scanButton.setEnabled(False)
+        self.statusLabel.setText("Looking for scanners...")
+        QApplication.processEvents()
+
+        try:
+            devices = discover_scanners()
+            scanner = preferred_scanner(devices)
+            if scanner is None:
+                self.statusLabel.setText(
+                    "No WIA scanner detected. The Canon driver may be TWAIN-only."
+                )
+                return
+
+            name = scanner.get("Name", "Scanner")
+            self.statusLabel.setText(
+                f'Scanner detected: {name}. Ready for the next batch-scan step.'
+            )
+        except ScannerError as error:
+            self.statusLabel.setText(str(error))
+        finally:
+            self.scanButton.setEnabled(True)
 
     def open_pdf(self):
         filename, _ = QFileDialog.getOpenFileName(
@@ -249,6 +277,7 @@ class MainWindow(QMainWindow):
 
     def set_split_controls_enabled(self, enabled):
         self.openButton.setEnabled(enabled)
+        self.scanButton.setEnabled(enabled)
         self.ocrButton.setEnabled(enabled and self.doc is not None)
         self.splitButton.setEnabled(enabled and self.doc is not None)
         self.openOutputButton.setEnabled(
