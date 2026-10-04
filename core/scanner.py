@@ -59,19 +59,10 @@ def list_twain_sources():
 
 
 def _canon_r40_source():
-    lines = list_twain_sources()
-    # TwainSave's device-list output can contain labels around the product name.
-    # Prefer any line containing R40; selectbyname also accepts the product name
-    # reported by the TWAIN source.
-    for line in lines:
-        if "r40" in line.lower():
-            # Common outputs are either the raw product name or "N: Product".
-            candidate = line.split(":", 1)[-1].strip()
-            return candidate.strip('"')
-    raise ScannerError(
-        "The Canon R40 TWAIN source was not found. Installed TWAIN sources: "
-        + (", ".join(lines) if lines else "none")
-    )
+    # The installed Canon 64-bit data source is R40.ds. Canon exposes the
+    # product name as "R40" to TWAIN, so select it directly and avoid the
+    # source-selection dialog on every scan.
+    return "R40"
 
 
 def scan_batch(dpi=300, duplex=True):
@@ -93,7 +84,7 @@ def scan_batch(dpi=300, duplex=True):
 
     args = [
         exe,
-        "--selectbydialog",
+        "--selectbyname", _canon_r40_source(),
         "--filename", seed,
         "--filetype", "bmp",
         "--autofeed",
