@@ -80,12 +80,16 @@ def scan_batch(output_path, dpi=300, duplex=True):
             "TWAIN support is not installed yet. Run setup_twain.ps1 once, then restart the app."
         )
 
-    source = _canon_r40_source()
+    # For the first TWAIN acquisition, let the TWAIN Source Manager present
+    # its native source picker. This avoids guessing/parsing a product name
+    # from TwainSave's console output. Once Canon R40 acquisition is proven,
+    # we can persist/select that exact source automatically.
+    source = "Canon R40 (TWAIN)"
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     args = [
         exe,
-        "--selectbyname", source,
+        "--selectbydialog",
         "--filename", output_path,
         "--filetype", "pdf",
         "--multipage",
@@ -96,6 +100,7 @@ def scan_batch(output_path, dpi=300, duplex=True):
         "--noui",
         "--numpages", "0",
         "--overwritemode", "1",
+        "--nopause",
     ]
     if duplex:
         args.append("--duplex")
