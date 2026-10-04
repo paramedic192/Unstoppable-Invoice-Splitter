@@ -7,6 +7,8 @@ basic Windows discovery, but is intentionally not used for ADF acquisition.
 
 import os
 import subprocess
+import tempfile
+import glob
 
 
 class ScannerError(RuntimeError):
@@ -72,33 +74,36 @@ def _canon_r40_source():
     )
 
 
-def scan_batch(output_path, dpi=300, duplex=True):
-    """Acquire the complete Canon R40 ADF into one multipage PDF."""
+def scan_batch(dpi=300, duplex=True):
+    """Acquire the complete Canon R40 ADF as individual page images.
+
+    Individual files are deliberate: some document TWAIN sources successfully
+    feed an entire batch but do not finalize a multipage PDF correctly through
+    generic TWAIN. The app combines the returned pages itself.
+    """
     exe = _find_twainsave()
     if not exe:
         raise ScannerError(
             "TWAIN support is not installed yet. Run setup_twain.ps1 once, then restart the app."
         )
 
-    # For the first TWAIN acquisition, let the TWAIN Source Manager present
-    # its native source picker. This avoids guessing/parsing a product name
-    # from TwainSave's console output. Once Canon R40 acquisition is proven,
-    # we can persist/select that exact source automatically.
+    batch_dir = tempfile.mkdtemp(prefix="unstoppable_twain_")
+    seed = os.path.join(batch_dir, "page.bmp")
     source = "Canon R40 (TWAIN)"
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     args = [
         exe,
         "--selectbydialog",
-        "--filename", output_path,
-        "--filetype", "pdf",
-        "--multipage",
+        "--filename", seed,
+        "--filetype", "bmp",
         "--autofeed",
         "--resolution", str(dpi),
         "--color", "2",
         "--papersize", "letter",
         "--noui",
         "--numpages", "0",
+        "--useinc",
+        "--incvalue", "1",
         "--overwritemode", "1",
         "--nopause",
     ]
@@ -122,9 +127,12 @@ def scan_batch(output_path, dpi=300, duplex=True):
     details = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
     if result.returncode != 0:
         raise ScannerError(f"TWAIN batch scan failed: {details or 'unknown error'}")
-    if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+
+    paths = sorted(glob.glob(os.path.join(batch_dir, "*.bmp")))
+    if not paths:
         raise ScannerError(
-            "The Canon R40 finished without creating a PDF. "
+            "The Canon R40 finished without returning page images. "
             + (details if details else "Check that pages are loaded in the feeder.")
         )
-    return output_path, source
+    return paths, batch_dir, source
+
