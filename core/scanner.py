@@ -74,15 +74,16 @@ def preferred_scanner(devices):
 
 
 def scan_batch(device_id=None, dpi=300, duplex=True, max_pages=200):
-    """Scan all pages available in the WIA feeder and return image file paths.
+    """Scan an ADF batch through WIA and return image file paths.
 
-    The files live in a temporary batch directory. The caller owns that
-    directory for the lifetime of the imported document.
+    Canon document scanners can expose the feeder as a new WIA item after each
+    transfer, so reconnect/reacquire the item for every sheet instead of
+    reusing the first item object.
     """
     batch_dir = tempfile.mkdtemp(prefix="unstoppable_scan_")
     safe_dir = batch_dir.replace("'", "''")
     safe_id = (device_id or "").replace("'", "''")
-    duplex_value = 5 if duplex else 1  # feeder + duplex, or feeder only
+    duplex_value = 5 if duplex else 1
 
     script = rf"""
 $ErrorActionPreference = 'Stop'
@@ -98,28 +99,31 @@ foreach ($info in $manager.DeviceInfos) {{
 }}
 if (-not $target) {{ throw 'Canon R40 scanner was not found.' }}
 
-$device = $target.Connect()
-
-# Prefer the automatic document feeder and duplex when the driver exposes it.
-try {{ $device.Properties.Item('Document Handling Select').Value = {duplex_value} }} catch {{}}
-try {{ $device.Properties.Item(3088).Value = {duplex_value} }} catch {{}}
-
-$item = $device.Items.Item(1)
-try {{ $item.Properties.Item('Horizontal Resolution').Value = {dpi} }} catch {{}}
-try {{ $item.Properties.Item('Vertical Resolution').Value = {dpi} }} catch {{}}
-try {{ $item.Properties.Item(6147).Value = {dpi} }} catch {{}}
-try {{ $item.Properties.Item(6148).Value = {dpi} }} catch {{}}
-
 $paths = @()
 for ($n = 1; $n -le {max_pages}; $n++) {{
     try {{
+        # Reconnect each transfer. Some Canon WIA drivers invalidate the prior
+        # item after one feeder acquisition.
+        $device = $target.Connect()
+        try {{ $device.Properties.Item('Document Handling Select').Value = {duplex_value} }} catch {{}}
+        try {{ $device.Properties.Item(3088).Value = {duplex_value} }} catch {{}}
+
+        if ($device.Items.Count -lt 1) {{ break }}
+        $item = $device.Items.Item(1)
+        try {{ $item.Properties.Item('Horizontal Resolution').Value = {dpi} }} catch {{}}
+        try {{ $item.Properties.Item('Vertical Resolution').Value = {dpi} }} catch {{}}
+        try {{ $item.Properties.Item(6147).Value = {dpi} }} catch {{}}
+        try {{ $item.Properties.Item(6148).Value = {dpi} }} catch {{}}
+
         $image = $item.Transfer()
         if (-not $image) {{ break }}
+
         $path = Join-Path '{safe_dir}' ('page_' + $n.ToString('000') + '.bmp')
         $image.SaveFile($path)
         $paths += $path
     }}
     catch {{
+        # End-of-feeder is expected after at least one successful transfer.
         if ($paths.Count -eq 0) {{ throw }}
         break
     }}
@@ -155,3 +159,4 @@ $paths | ConvertTo-Json -Compress
     if not paths:
         raise ScannerError("The scanner did not produce any readable pages.")
     return paths, batch_dir
+
