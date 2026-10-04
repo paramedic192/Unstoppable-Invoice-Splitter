@@ -75,7 +75,7 @@ def _canon_r40_source():
 
 
 def scan_batch(dpi=300, duplex=True):
-    """Acquire the complete Canon R40 ADF as individual page images.
+    """Acquire the complete Canon R40 ADF as individual page images.\n\n    Image-quality controls are intentionally left to the Canon TWAIN driver\n    while we tune the R40 profile; the app only requests resolution, feeder,\n    and duplex. This avoids overriding Canon image processing with generic\n    TWAIN defaults.
 
     Individual files are deliberate: some document TWAIN sources successfully
     feed an entire batch but do not finalize a multipage PDF correctly through
@@ -98,9 +98,6 @@ def scan_batch(dpi=300, duplex=True):
         "--filetype", "bmp",
         "--autofeed",
         "--resolution", str(dpi),
-        "--color", "2",
-        "--papersize", "letter",
-        "--noui",
         "--numpages", "0",
         "--useinc",
         "--incvalue", "1",
