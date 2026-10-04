@@ -9,7 +9,7 @@ import fitz
 from PIL import Image
 
 from core.ocr_engine import OCREngine, OCREngineError
-from core.scanner import ScannerError, discover_scanners, preferred_scanner, scan_batch
+from core.scanner import ScannerError, scan_batch
 from PySide6.QtCore import QSettings, QSize, Qt
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
@@ -167,61 +167,36 @@ class MainWindow(QMainWindow):
 
     def scan_from_scanner(self):
         self.set_split_controls_enabled(False)
-        self.statusLabel.setText("Connecting to Canon R40...")
+        self.statusLabel.setText("Connecting to Canon R40 through TWAIN...")
         self.progressLabel.setText("Load invoices in the feeder. Scanning at 300 DPI duplex...")
         self.progressLabel.show()
         QApplication.processEvents()
 
         try:
-            devices = discover_scanners()
-            scanner = preferred_scanner(devices)
-            if scanner is None:
-                raise ScannerError("No WIA scanner detected.")
+            scan_folder = self.last_output_folder
+            if not scan_folder or not os.path.isdir(scan_folder):
+                scan_folder = os.path.join(os.path.expanduser("~"), "Documents")
+            os.makedirs(scan_folder, exist_ok=True)
 
-            name = scanner.get("Name", "Scanner")
-            self.statusLabel.setText(f"Scanning from {name}...")
+            filename = "Scan_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".pdf"
+            output_path = self.get_unique_filename(scan_folder, filename)
+
+            self.statusLabel.setText("Scanning entire Canon R40 feeder through TWAIN...")
             QApplication.processEvents()
 
-            paths, batch_dir = scan_batch(
-                device_id=scanner.get("DeviceID"),
+            output_path, source_name = scan_batch(
+                output_path=output_path,
                 dpi=300,
                 duplex=True,
             )
 
-            pdf = fitz.open()
-            try:
-                for path in paths:
-                    image_doc = fitz.open(path)
-                    try:
-                        pdf_bytes = image_doc.convert_to_pdf()
-                        page_pdf = fitz.open("pdf", pdf_bytes)
-                        try:
-                            pdf.insert_pdf(page_pdf)
-                        finally:
-                            page_pdf.close()
-                    finally:
-                        image_doc.close()
-
-                scan_folder = self.last_output_folder
-                if not scan_folder or not os.path.isdir(scan_folder):
-                    scan_folder = os.path.join(os.path.expanduser("~"), "Documents")
-                os.makedirs(scan_folder, exist_ok=True)
-                filename = "Scan_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".pdf"
-                output_path = self.get_unique_filename(scan_folder, filename)
-                pdf.save(output_path)
-            finally:
-                pdf.close()
-
-            if self.scan_temp_dir and os.path.isdir(self.scan_temp_dir):
-                shutil.rmtree(self.scan_temp_dir, ignore_errors=True)
-            self.scan_temp_dir = batch_dir
-
             self.load_pdf_file(output_path)
+            page_count = self.doc.page_count if self.doc is not None else 0
             self.progressLabel.setText(
-                f"Scan complete: {len(paths)} page(s) imported."
+                f"Scan complete: {page_count} page(s) imported."
             )
             self.statusLabel.setText(
-                f"Scan complete. {len(paths)} page(s) loaded from {name}."
+                f"Scan complete. {page_count} page(s) loaded from {source_name}."
             )
         except ScannerError as error:
             self.progressLabel.setText("Scan stopped.")
