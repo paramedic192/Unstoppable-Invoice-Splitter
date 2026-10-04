@@ -172,6 +172,7 @@ class MainWindow(QMainWindow):
         self.progressLabel.show()
         QApplication.processEvents()
 
+        batch_dir = None
         try:
             scan_folder = self.last_output_folder
             if not scan_folder or not os.path.isdir(scan_folder):
@@ -184,17 +185,34 @@ class MainWindow(QMainWindow):
             self.statusLabel.setText("Scanning entire Canon R40 feeder through TWAIN...")
             QApplication.processEvents()
 
-            output_path, source_name = scan_batch(
-                output_path=output_path,
-                dpi=300,
-                duplex=True,
-            )
+            paths, batch_dir, source_name = scan_batch(dpi=300, duplex=True)
+
+            pdf = fitz.open()
+            try:
+                for path in paths:
+                    image_doc = fitz.open(path)
+                    try:
+                        page_pdf = fitz.open("pdf", image_doc.convert_to_pdf())
+                        try:
+                            pdf.insert_pdf(page_pdf)
+                        finally:
+                            page_pdf.close()
+                    finally:
+                        image_doc.close()
+                if pdf.page_count == 0:
+                    raise ScannerError("TWAIN returned no usable scanned pages.")
+                pdf.save(output_path)
+            finally:
+                pdf.close()
+
+            if self.scan_temp_dir and os.path.isdir(self.scan_temp_dir):
+                shutil.rmtree(self.scan_temp_dir, ignore_errors=True)
+            self.scan_temp_dir = batch_dir
+            batch_dir = None
 
             self.load_pdf_file(output_path)
             page_count = self.doc.page_count if self.doc is not None else 0
-            self.progressLabel.setText(
-                f"Scan complete: {page_count} page(s) imported."
-            )
+            self.progressLabel.setText(f"Scan complete: {page_count} page(s) imported.")
             self.statusLabel.setText(
                 f"Scan complete. {page_count} page(s) loaded from {source_name}."
             )
@@ -205,6 +223,8 @@ class MainWindow(QMainWindow):
             self.progressLabel.setText("Scan stopped.")
             self.statusLabel.setText(f"Scan failed: {error}")
         finally:
+            if batch_dir and os.path.isdir(batch_dir):
+                shutil.rmtree(batch_dir, ignore_errors=True)
             self.set_split_controls_enabled(True)
 
     def open_pdf(self):
