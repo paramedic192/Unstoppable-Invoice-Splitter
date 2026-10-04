@@ -1,162 +1,125 @@
-"""Windows scanner discovery for Unstoppable Invoice Splitter.
+"""TWAIN scanner support for Unstoppable Invoice Splitter.
 
-Phase 1 deliberately performs discovery only.  Actual acquisition will be added
-after we confirm how the installed Canon R40 driver is exposed on the target PC.
+The Canon imageFORMULA R40 is acquired through its native 64-bit TWAIN driver
+using the open-source TwainSave command-line bridge. WIA remains useful for
+basic Windows discovery, but is intentionally not used for ADF acquisition.
 """
 
 import os
 import subprocess
-import tempfile
 
 
 class ScannerError(RuntimeError):
     pass
 
 
-def discover_scanners():
-    """Return Windows imaging devices visible through WIA.
+def _project_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    Uses PowerShell/COM so the development build needs no additional Python
-    package just to discover the scanner.
-    """
-    script = r"""
-$ErrorActionPreference = 'Stop'
-$manager = New-Object -ComObject WIA.DeviceManager
-$devices = @()
-foreach ($info in $manager.DeviceInfos) {
-    if ($info.Type -eq 1) {
-        $name = ''
-        try { $name = $info.Properties.Item('Name').Value } catch {}
-        if ([string]::IsNullOrWhiteSpace($name)) { $name = "Scanner $($info.DeviceID)" }
-        $devices += [PSCustomObject]@{
-            Name = $name
-            DeviceID = $info.DeviceID
-        }
-    }
-}
-$devices | ConvertTo-Json -Compress
-"""
+
+def _find_twainsave():
+    roots = [
+        os.path.join(_project_root(), "tools", "twainsave"),
+        os.path.join(_project_root(), "twainsave"),
+    ]
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for folder, _, files in os.walk(root):
+            for name in files:
+                if name.lower() in ("twainsave64.exe", "twainsave-opensource.exe"):
+                    return os.path.join(folder, name)
+    return None
+
+
+def twain_ready():
+    return _find_twainsave() is not None
+
+
+def list_twain_sources():
+    exe = _find_twainsave()
+    if not exe:
+        raise ScannerError(
+            "TWAIN support is not installed yet. Run setup_twain.ps1 once, then restart the app."
+        )
+    result = subprocess.run(
+        [exe, "--devicelist"],
+        cwd=os.path.dirname(exe),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    if result.returncode != 0:
+        raise ScannerError(f"Could not list TWAIN scanners: {output or 'unknown error'}")
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _canon_r40_source():
+    lines = list_twain_sources()
+    # TwainSave's device-list output can contain labels around the product name.
+    # Prefer any line containing R40; selectbyname also accepts the product name
+    # reported by the TWAIN source.
+    for line in lines:
+        if "r40" in line.lower():
+            # Common outputs are either the raw product name or "N: Product".
+            candidate = line.split(":", 1)[-1].strip()
+            return candidate.strip('"')
+    raise ScannerError(
+        "The Canon R40 TWAIN source was not found. Installed TWAIN sources: "
+        + (", ".join(lines) if lines else "none")
+    )
+
+
+def scan_batch(output_path, dpi=300, duplex=True):
+    """Acquire the complete Canon R40 ADF into one multipage PDF."""
+    exe = _find_twainsave()
+    if not exe:
+        raise ScannerError(
+            "TWAIN support is not installed yet. Run setup_twain.ps1 once, then restart the app."
+        )
+
+    source = _canon_r40_source()
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    args = [
+        exe,
+        "--selectbyname", source,
+        "--filename", output_path,
+        "--filetype", "pdf",
+        "--multipage",
+        "--autofeed",
+        "--resolution", str(dpi),
+        "--color", "2",
+        "--papersize", "letter",
+        "--noui",
+        "--numpages", "0",
+        "--overwritemode", "1",
+    ]
+    if duplex:
+        args.append("--duplex")
+
     try:
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            args,
+            cwd=os.path.dirname(exe),
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=900,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ScannerError(f"Could not query Windows scanners: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ScannerError("TWAIN scan timed out before the feeder completed.") from exc
+    except OSError as exc:
+        raise ScannerError(f"Could not start TWAIN scanning: {exc}") from exc
 
+    details = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
     if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip() or "Unknown WIA error"
-        raise ScannerError(f"Windows scanner detection failed: {message}")
-
-    import json
-    raw = result.stdout.strip()
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ScannerError(f"Could not read scanner list: {exc}") from exc
-    if isinstance(data, dict):
-        data = [data]
-    return data
-
-
-def preferred_scanner(devices):
-    """Prefer the Canon imageFORMULA R40 when it is present."""
-    for device in devices:
-        name = str(device.get("Name", "")).lower()
-        if "r40" in name or ("canon" in name and "imageformula" in name):
-            return device
-    return devices[0] if devices else None
-
-
-def scan_batch(device_id=None, dpi=300, duplex=True, max_pages=200):
-    """Scan an ADF batch through WIA and return image file paths.
-
-    Canon document scanners can expose the feeder as a new WIA item after each
-    transfer, so reconnect/reacquire the item for every sheet instead of
-    reusing the first item object.
-    """
-    batch_dir = tempfile.mkdtemp(prefix="unstoppable_scan_")
-    safe_dir = batch_dir.replace("'", "''")
-    safe_id = (device_id or "").replace("'", "''")
-    duplex_value = 5 if duplex else 1
-
-    script = rf"""
-$ErrorActionPreference = 'Stop'
-$manager = New-Object -ComObject WIA.DeviceManager
-$target = $null
-foreach ($info in $manager.DeviceInfos) {{
-    if ($info.Type -eq 1) {{
-        if ('{safe_id}' -and $info.DeviceID -eq '{safe_id}') {{ $target = $info; break }}
-        $name = ''
-        try {{ $name = $info.Properties.Item('Name').Value }} catch {{}}
-        if (-not $target -and ($name -match 'R40|imageFORMULA')) {{ $target = $info }}
-    }}
-}}
-if (-not $target) {{ throw 'Canon R40 scanner was not found.' }}
-
-$paths = @()
-for ($n = 1; $n -le {max_pages}; $n++) {{
-    try {{
-        # Reconnect each transfer. Some Canon WIA drivers invalidate the prior
-        # item after one feeder acquisition.
-        $device = $target.Connect()
-        try {{ $device.Properties.Item('Document Handling Select').Value = {duplex_value} }} catch {{}}
-        try {{ $device.Properties.Item(3088).Value = {duplex_value} }} catch {{}}
-
-        if ($device.Items.Count -lt 1) {{ break }}
-        $item = $device.Items.Item(1)
-        try {{ $item.Properties.Item('Horizontal Resolution').Value = {dpi} }} catch {{}}
-        try {{ $item.Properties.Item('Vertical Resolution').Value = {dpi} }} catch {{}}
-        try {{ $item.Properties.Item(6147).Value = {dpi} }} catch {{}}
-        try {{ $item.Properties.Item(6148).Value = {dpi} }} catch {{}}
-
-        $image = $item.Transfer()
-        if (-not $image) {{ break }}
-
-        $path = Join-Path '{safe_dir}' ('page_' + $n.ToString('000') + '.bmp')
-        $image.SaveFile($path)
-        $paths += $path
-    }}
-    catch {{
-        # End-of-feeder is expected after at least one successful transfer.
-        if ($paths.Count -eq 0) {{ throw }}
-        break
-    }}
-}}
-$paths | ConvertTo-Json -Compress
-"""
-    try:
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
+        raise ScannerError(f"TWAIN batch scan failed: {details or 'unknown error'}")
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+        raise ScannerError(
+            "The Canon R40 finished without creating a PDF. "
+            + (details if details else "Check that pages are loaded in the feeder.")
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ScannerError(f"Batch scan failed: {exc}") from exc
-
-    if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip() or "Unknown WIA scan error"
-        raise ScannerError(f"Batch scan failed: {message}")
-
-    import json
-    raw = result.stdout.strip()
-    if not raw:
-        raise ScannerError("The scanner returned no pages. Check the document feeder.")
-    try:
-        paths = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ScannerError(f"Could not read scanned page list: {exc}") from exc
-    if isinstance(paths, str):
-        paths = [paths]
-    paths = [path for path in paths if os.path.isfile(path)]
-    if not paths:
-        raise ScannerError("The scanner did not produce any readable pages.")
-    return paths, batch_dir
-
+    return output_path, source
